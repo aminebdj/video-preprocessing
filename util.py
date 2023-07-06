@@ -1,7 +1,9 @@
 import numpy as np
 from skimage import img_as_ubyte
 from skimage.transform import resize
+import torchaudio
 import imageio
+import cv2, os
 
 def bb_intersection_over_union(boxA, boxB):
     xA = max(boxA[0], boxB[0])
@@ -34,7 +36,7 @@ def compute_aspect_preserved_bbox(bbox, increase_area):
     left, top, right, bot = bbox
     width = right - left
     height = bot - top
- 
+
     width_increase = max(increase_area, ((1 + 2 * increase_area) * height - width) / (2 * width))
     height_increase = max(increase_area, ((1 + 2 * increase_area) * width - height) / (2 * height))
 
@@ -49,15 +51,13 @@ def compute_increased_bbox(bbox, increase_area):
     left, top, right, bot = bbox
     width = right - left
     height = bot - top
- 
+
     left = int(left - increase_area * width)
     top = int(top - increase_area * height)
     right = int(right + increase_area * width)
     bot = int(bot + increase_area * height)
 
     return (left, top, right, bot)
-
-
 
 def crop_bbox_from_frames(frame_list, tube_bbox, min_frames=16, image_shape=(256, 256), min_size=200,
                           increase_area=0.1, aspect_preserving=True):
@@ -71,18 +71,18 @@ def crop_bbox_from_frames(frame_list, tube_bbox, min_frames=16, image_shape=(256
     # Filter if it is too small
     if max(width, height) < min_size:
         return None, None
-    
+
     if aspect_preserving:
         left, top, right, bot = compute_aspect_preserved_bbox(tube_bbox, increase_area)
     else:
         left, top, right, bot = compute_increased_bbox(tube_bbox, increase_area)
- 
+
     # Compute out of bounds
     left_oob = -min(0, left)
     right_oob = right - min(right, frame_shape[1])
     top_oob = -min(0, top)
     bot_oob = bot - min(bot, frame_shape[0])
-    
+
     #Not use near the border
     if max(left_oob / float(width), right_oob / float(width), top_oob  / float(height), bot_oob / float(height)) > 0:
         return [None, None]
@@ -92,7 +92,7 @@ def crop_bbox_from_frames(frame_list, tube_bbox, min_frames=16, image_shape=(256
         out = [img_as_ubyte(resize(frame, image_shape, anti_aliasing=True)) for frame in selected]
     else:
         out = selected
- 
+
     return out, [left, top, right, bot]
 
 from multiprocessing import Pool
@@ -113,17 +113,35 @@ def scheduler(data_list, fn, args):
             f.flush()
     f.close()
 
-def save(path, frames, format):
+def write_frames_to_video(frame_list, output_file, fps, ffmpeg, remove, desired_fps):
+    height, width, channels = frame_list[0].shape
+
+    # Define the codec and create a VideoWriter object
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Specify the video codec (e.g., 'XVID', 'MJPG', 'mp4v')
+    video_writer = cv2.VideoWriter(output_file, fourcc, fps, (width, height))
+
+    # Write each frame to the video
+    for frame in frame_list:
+        video_writer.write(frame)
+
+    # Release the video writer and destroy any remaining windows
+    video_writer.release()
+    os.system(ffmpeg.format(output_file, 'r', desired_fps, output_file.replace('.mp4', '-r.mp4')))
+    os.system(remove.format(output_file))
+
+def write_audio(audio_list, output_file, samplerate, ffmpeg, remove, desired_sample_rate):
+    # write torchaudio tensor to wav file
+    torchaudio.save(output_file, audio_list, samplerate)
+    os.system(ffmpeg.format(output_file, 'ar', desired_sample_rate,  output_file.replace('.wav', '-r.wav'))) 
+    os.system(remove.format(output_file))
+
+def save(path, frames, audio, format, fps, samplerate, desired_fps, desired_sample_rate):
+    ffmpeg_command = "ffmpeg -y -i {} -{} {} {}"
+    remove_command = "rm {}"
     if format == '.mp4':
-        imageio.mimsave(path, frames)
-    elif format == '.png':
-        if os.path.exists(path):
-            print ("Warning: skiping video %s" % os.path.basename(path))
-            return
-        else:
-            os.makedirs(path)
-        for j, frame in enumerate(frames):
-            imageio.imsave(os.path.join(path, str(j).zfill(7) + '.png'), frames[j]) 
+        write_frames_to_video(frames, path, fps, ffmpeg_command, remove_command,  desired_fps)
+        # write_audio(audio, path.replace('.mp4', '.wav'), samplerate, ffmpeg_command, remove_command, desired_sample_rate)
+        
     else:
         print ("Unknown format %s" % format)
         exit()
